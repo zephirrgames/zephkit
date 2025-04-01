@@ -774,10 +774,10 @@ def get_or_create_collection(name, parent_name=None):
 	
 	return new_collection
 
-def add_visibility_driver(obj, loop_indices):
+def add_visibility_driver(obj, loop_indices, invert = False, path="hide_viewport"):
 	# Create a single driver variable for all loops
 	scene = bpy.context.scene
-	fcurve = obj.driver_add("hide_viewport")
+	fcurve = obj.driver_add(path)
 	driver = fcurve.driver
 	driver.type = 'SCRIPTED'
 	
@@ -804,8 +804,8 @@ def add_visibility_driver(obj, loop_indices):
 	
 	# Combine all conditions with OR
 	driver.expression = " or ".join(conditions)
-	# Invert it all.
-	driver.expression = "not (" + driver.expression + ")"
+	if invert:
+		driver.expression = "not (" + driver.expression + ")"
 
 ### OPERATORS
 class ZEPHKIT_OT_SetViewMode(bpy.types.Operator):
@@ -993,58 +993,108 @@ class ZEPHKIT_OT_TweakActionMode(bpy.types.Operator):
 		return {'FINISHED'}
 
 class ZEPHKIT_OT_LinkObjectToLoop(bpy.types.Operator):
-    """Create a new loop and remove from the Scene Collection"""
-    bl_idname = "zephkit.link_object_to_loop"
-    bl_label = "Link"
+	"""Create a new loop and remove from the Scene Collection"""
+	bl_idname = "zephkit.link_object_to_loop"
+	bl_label = "Link"
 
-    link_loop: bpy.props.EnumProperty(
-        name="Loop",
-        description="Choose a loop to link the object",
-        items=get_loop_items,
-        default=-1,
-    )
+	link_loop: bpy.props.EnumProperty(
+		name="Loop",
+		description="Choose a loop to link the object",
+		items=get_loop_items,
+		default=-1,
+	)
 
-    def execute(self, context):
-        if int(self.link_loop) == -1:
-            self.report({'WARNING'}, "You must select a loop!")
-            return {'CANCELLED'}
-        else:
-            scene = context.scene
-            loop_indices = [int(self.link_loop)]  # Start with the selected loop index
+	def execute(self, context):
+		if int(self.link_loop) == -1:
+			self.report({'WARNING'}, "You must select a loop!")
+			return {'CANCELLED'}
+		else:
+			scene = context.scene
+			loop_indices = [int(self.link_loop)]  # Start with the selected loop index
 
-            # Get the current object
-            obj = context.object
+			# Get the current object
+			obj = context.object
 
-            # Ensure the object is not already in the collection
-            collection = get_or_create_collection("TEMP#" + str(int(self.link_loop)), "TEMPORAL")
-            if collection:
-                # Link the object to the loop collection
-                collection.objects.link(obj)
-                self.report({'INFO'}, f"Linked {obj.name} to {collection.name}")
+			# Ensure the object is not already in the collection
+			collection = get_or_create_collection("TEMP#" + str(int(self.link_loop)), "TEMPORAL")
+			if collection:
+				# Link the object to the loop collection
+				collection.objects.link(obj)
+				self.report({'INFO'}, f"Linked {obj.name} to {collection.name}")
 
-                # Remove the object from the Scene Collection
-                scene_collection = bpy.context.scene.collection
-                if obj.name in scene_collection.objects:
-                    scene_collection.objects.unlink(obj)
-                    self.report({'INFO'}, f"Unlinked {obj.name} from the Scene Collection")
+				# Remove the object from the Scene Collection
+				scene_collection = bpy.context.scene.collection
+				if obj.name in scene_collection.objects:
+					scene_collection.objects.unlink(obj)
+					self.report({'INFO'}, f"Unlinked {obj.name} from the Scene Collection")
 
-                # Find the other TEMP# collections the object is part of
-                for coll in bpy.data.collections:
-                    if coll.name.startswith("TEMP#") and obj.name in coll.objects:
-                        # Add the index of each loop (TEMP# collection) the object is part of
-                        loop_index = int(coll.name.split("#")[1])  # Extract loop index from collection name
-                        if loop_index not in loop_indices:
-                            loop_indices.append(loop_index)
+				# Find the other TEMP# collections the object is part of
+				for coll in bpy.data.collections:
+					if coll.name.startswith("TEMP#") and obj.name in coll.objects:
+						# Add the index of each loop (TEMP# collection) the object is part of
+						loop_index = int(coll.name.split("#")[1])  # Extract loop index from collection name
+						if loop_index not in loop_indices:
+							loop_indices.append(loop_index)
 
-                # Add the visibility driver for the current and other loops
-                add_visibility_driver(obj, loop_indices)  # Pass all loop indices to the function
-                return {'FINISHED'}
-            else:
-                self.report({'WARNING'}, "Something went wrong...")
-                return {'CANCELLED'}
+				# Add the visibility driver for the current and other loops
+				add_visibility_driver(obj, loop_indices, True)  # Pass all loop indices to the function
+				# Add it to all geonodes modifiers as well.
+				for modifier in obj.modifiers:
+					if modifier.type == 'NODES':  # Ensure it's a Geometry Nodes modifier
+						add_visibility_driver(modifier, loop_indices, False, "show_viewport")
 
-    def invoke(self, context, event):
-        return context.window_manager.invoke_props_dialog(self)
+				return {'FINISHED'}
+			else:
+				self.report({'WARNING'}, "Something went wrong...")
+				return {'CANCELLED'}
+
+	def invoke(self, context, event):
+		return context.window_manager.invoke_props_dialog(self)
+
+class ZEPHKIT_OT_UpdateDrivers(bpy.types.Operator):
+	"""Update visibility drivers for all objects in TEMP# collections"""
+	bl_idname = "zephkit.update_drivers"
+	bl_label = "Update"
+
+	def execute(self, context):
+		# Iterate through all TEMP# collections
+		scene = context.scene
+		loop_indices = []
+
+		# Collect all TEMP# collections
+		temp_collections = [coll for coll in bpy.data.collections if coll.name.startswith("TEMP#")]
+		
+		if not temp_collections:
+			self.report({'WARNING'}, "No TEMP# collections found!")
+			return {'CANCELLED'}
+
+		# Loop through each TEMP# collection
+		objects_dict = {
+			#<object>:[<loop indices>]
+		}
+		# Collect a dictionary of data
+		for coll in temp_collections:
+			for obj in coll.objects:
+				if obj not in objects_dict.keys():
+					objects_dict[obj] = []
+				objects_dict[obj].append(int(coll.name[-1]))
+
+		for obj in objects_dict.keys():
+			# remove all drivers before adding new ones...
+			if obj.animation_data:
+				for fcurve in obj.animation_data.drivers:
+					if "frame >=" in fcurve.driver.expression:
+						obj.animation_data.drivers.remove(fcurve)
+			# And then add drivers using the key's value.
+			# Add the visibility driver for the object in the collection
+			add_visibility_driver(obj, objects_dict[obj], invert=True)  # For hide_viewport
+
+			# Add visibility driver for all Geometry Nodes modifiers as well
+			for modifier in obj.modifiers:
+				if modifier.type == 'NODES':  # Ensure it's a Geometry Nodes modifier
+					add_visibility_driver(modifier, objects_dict[obj], invert=False, path="show_viewport")
+		self.report({'INFO'}, "Drivers updated for all objects in TEMP# collections")
+		return {'FINISHED'}
 
 class ZEPHKIT_OT_RenameLoop(bpy.types.Operator):
 	"""Rename a loop from the scene"""
@@ -1226,6 +1276,7 @@ class ZEPHKIT_PT_TemporalObjectsPanel(bpy.types.Panel):
 		layout = self.layout
 		col = layout.column(align=True)
 		obj = context.object
+		col.operator("zephkit.update_drivers")
 		if obj:
 			temp_collection = get_or_create_collection("TEMPORAL")
 			if temp_collection:
@@ -1251,9 +1302,10 @@ modules = [
 	ZEPHKIT_PT_RenderLoopsAudio,
 	ZEPHKIT_OT_GlobalUpdate,
 	ZEPHKIT_OT_TestUpdateIntensity,
+	ZEPHKIT_OT_UpdateDrivers,
 	ZEPHKIT_OT_LinkObjectToLoop,
 	ZEPHKIT_OT_UnlinkTempObject,
-	ZEPHKIT_PT_TemporalObjectsPanel
+	ZEPHKIT_PT_TemporalObjectsPanel,
 ]
 def register():
 	bpy.utils.register_class(ActionItem)
