@@ -442,115 +442,123 @@ def constructListofLoopPoints(self, context, condition, use_all):
 
 	return loopData
 def audio_update(self, context, use_all=False):
-	update_time_for_speed(context)
+    update_time_for_speed(context)
 
-	def loopCondition(loop):
-		return bool(loop.audio_pool)
+    def loopCondition(loop):
+        return bool(loop.audio_pool)
 
-	data = constructListofLoopPoints(self, context, loopCondition, use_all)
-	if not data:
-		return {'CANCELLED'}
+    data = constructListofLoopPoints(self, context, loopCondition, use_all)
+    if not data:
+        return {'CANCELLED'}
 
-	audio_data = []
-	fps = context.scene.render.fps
-	frame_end = context.scene.frame_end
-	frame_start = context.scene.frame_start
-	noise = PerlinNoise(octaves=50, seed=5)
+    audio_data = []
+    fps = context.scene.render.fps
+    frame_end = context.scene.frame_end
+    frame_start = context.scene.frame_start
+    noise = PerlinNoise(octaves=50, seed=5)
 
-	# Cache folder file lists to reduce os calls
-	folder_files_cache = {}
+    folder_files_cache = {}
 
-	action_name = "ANIMATED SPEED"
-	action = bpy.data.actions.get(action_name) or bpy.data.actions.new(name=action_name)
-	intensityCurve = None
-	for fc in action.fcurves:
-		if fc.data_path == "animated_intensity":
-			intensityCurve = fc
-			break
-	
-	for info, points in data.items():
-		loop = context.scene.loop_list[info]
-		loop.audio_pool = bpy.path.abspath(loop.audio_pool) # get rid of any relative paths.
-		folder_path = loop.audio_pool
+    action_name = "ANIMATED SPEED"
+    action = bpy.data.actions.get(action_name) or bpy.data.actions.new(name=action_name)
+    intensityCurve = None
+    for fc in action.fcurves:
+        if fc.data_path == "animated_intensity":
+            intensityCurve = fc
+            break
+    
+    total_steps = sum(len(points) for points in data.values()) + 1  # Total progress steps
+    wm = context.window_manager
+    wm.progress_begin(0, total_steps)  # Start progress bar
+    progress_step = 0
 
-		if folder_path not in folder_files_cache:
-			try:
-				folder_files_cache[folder_path] = [
-					os.path.join(folder_path, f) for f in os.listdir(folder_path) if os.path.isfile(os.path.join(folder_path, f))
-				]
-			except Exception as e:
-				print(f"Error accessing folder {folder_path}: {e}")
-				continue
-		
-		files = folder_files_cache.get(folder_path, [])
-		if not files:
-			print(f"Empty or inaccessible folder: {folder_path}")
-			continue
+    for info, points in data.items():
+        loop = context.scene.loop_list[info]
+        loop.audio_pool = bpy.path.abspath(loop.audio_pool)
+        folder_path = loop.audio_pool
 
-		volume_variation = 0.5
-		volume_variation_scale = 0.5
+        if folder_path not in folder_files_cache:
+            try:
+                folder_files_cache[folder_path] = [
+                    os.path.join(folder_path, f) for f in os.listdir(folder_path) if os.path.isfile(os.path.join(folder_path, f))
+                ]
+            except Exception as e:
+                print(f"Error accessing folder {folder_path}: {e}")
+                continue
+        
+        files = folder_files_cache.get(folder_path, [])
+        if not files:
+            print(f"Empty or inaccessible folder: {folder_path}")
+            continue
 
-		for point in points:
-			if intensityCurve:
-				animated_intensity = min(intensityCurve.evaluate(point), 1)
-			else:
-				animated_intensity = 1.0;
-			volume_offset = noise([(point * volume_variation_scale) / frame_end]) * volume_variation
-			total_volume = (loop.audio_volume * (1 + volume_offset)) * animated_intensity
+        volume_variation = 0.5
+        volume_variation_scale = 0.5
 
-			audio_data.append({
-				"file": random.choice(files),
-				"start_time": point / fps,
-				"volume": total_volume,
-				"offset": 0
-			})
+        for point in points:
+            if intensityCurve:
+                animated_intensity = min(intensityCurve.evaluate(point), 1)
+            else:
+                animated_intensity = 1.0
+            
+            volume_offset = noise([(point * volume_variation_scale) / frame_end]) * volume_variation
+            total_volume = (loop.audio_volume * (1 + volume_offset)) * animated_intensity
 
-	# Generate silent base audio track
-	total_duration_ms = ((frame_end - frame_start) / fps) * 1000
-	final_audio = AudioSegment.silent(duration=total_duration_ms).set_channels(2)
+            audio_data.append({
+                "file": random.choice(files),
+                "start_time": point / fps,
+                "volume": total_volume,
+                "offset": 0
+            })
+            
+            progress_step += 1
+            wm.progress_update(progress_step)  # Update progress bar
 
-	for audio in audio_data:
-		try:
-			audio_segment = AudioSegment.from_file(audio["file"])
+    total_duration_ms = ((frame_end - frame_start) / fps) * 1000
+    final_audio = AudioSegment.silent(duration=total_duration_ms).set_channels(2)
 
-			if audio_segment.channels != 2:
-				audio_segment = audio_segment.set_channels(2)
+    for audio in audio_data:
+        try:
+            audio_segment = AudioSegment.from_file(audio["file"])
 
+            if audio_segment.channels != 2:
+                audio_segment = audio_segment.set_channels(2)
 
-			# Apply random pitch variation
-			pitch_factor = 1.0 + random.uniform(-0.1, 0.1)
-			audio_segment = speedup(audio_segment, pitch_factor)
-			audio_segment = audio_segment.apply_gain(ratio_to_db(audio["volume"]))
+            pitch_factor = 1.0 + random.uniform(-0.1, 0.1)
+            audio_segment = speedup(audio_segment, pitch_factor)
+            audio_segment = audio_segment.apply_gain(ratio_to_db(audio["volume"]))
 
-			start_position_ms = int((audio["start_time"] - ((frame_start - audio["offset"]) / fps)) * 1000)
-			final_audio = final_audio.overlay(audio_segment, position=start_position_ms)
-		except Exception as e:
-			print(f"Error processing file {audio['file']}: {e}")
+            start_position_ms = int((audio["start_time"] - ((frame_start - audio["offset"]) / fps)) * 1000)
+            final_audio = final_audio.overlay(audio_segment, position=start_position_ms)
+        except Exception as e:
+            print(f"Error processing file {audio['file']}: {e}")
 
-	# Export final audio file
-	output_path = os.path.join(bpy.path.abspath("//"), f"zanim_audio_render_{context.scene.name}.wav")
-	final_audio.export(output_path, format="wav")
+        progress_step += 1
+        wm.progress_update(progress_step)  # Update progress bar
 
-	# Update Blender Sequence Editor
-	prev_area = bpy.context.area.type
-	bpy.context.area.type = "SEQUENCE_EDITOR"
+    output_path = os.path.join(bpy.path.abspath("//"), f"zanim_audio_render_{context.scene.name}.wav")
+    final_audio.export(output_path, format="wav")
 
-	seq = bpy.context.scene.sequence_editor
-	if seq:
-		bpy.ops.sequencer.select_all(action='DESELECT')
-		for strip in seq.sequences_all:
-			if strip.type == "SOUND" and strip.name == "zanim_render":
-				strip.select = True
-		bpy.ops.sequencer.delete()
+    prev_area = bpy.context.area.type
+    bpy.context.area.type = "SEQUENCE_EDITOR"
 
-	bpy.ops.sequencer.sound_strip_add(filepath=output_path, frame_start=frame_start)
-	for strip in bpy.context.selected_sequences:
-		strip.name = "zanim_render"
+    seq = bpy.context.scene.sequence_editor
+    if seq:
+        bpy.ops.sequencer.select_all(action='DESELECT')
+        for strip in seq.sequences_all:
+            if strip.type == "SOUND" and strip.name == "zanim_render":
+                strip.select = True
+        bpy.ops.sequencer.delete()
 
-	bpy.context.area.type = prev_area
-	print("Compiled audio exported successfully.")
-	
-	return {'FINISHED'}
+    bpy.ops.sequencer.sound_strip_add(filepath=output_path, frame_start=frame_start)
+    for strip in bpy.context.selected_sequences:
+        strip.name = "zanim_render"
+
+    bpy.context.area.type = prev_area
+    print("Compiled audio exported successfully.")
+
+    wm.progress_end()  # End progress bar
+    return {'FINISHED'}
+
 
 ### LOOP RELATED HELPER FUNCTIONS.
 def updateAction(context, actions):
@@ -1168,6 +1176,34 @@ class ZEPHKIT_OT_UnlinkTempObject(bpy.types.Operator):
 		
 		return {'FINISHED'}
 
+class ZEPHKIT_OT_RemoveActionFromLoop(bpy.types.Operator):
+    """Remove an action from a loop."""
+    bl_idname = "zephkit.remove_action_from_loop"
+    bl_label = "Remove Action"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    action: StringProperty(name="Action", default="")
+    loop_index: IntProperty(name="Loop Index", default=-1)
+
+    def execute(self, context):
+        scene = context.scene
+        if 0 <= self.loop_index < len(scene.loop_list):
+            loop = scene.loop_list[self.loop_index]
+            
+            # Find and remove the action from the loop's actions collection
+            for i, item in enumerate(loop.actions):
+                if item.action and item.action.name == self.action:
+                    loop.actions.remove(i)
+                    self.report({'INFO'}, f"Removed action '{self.action}' from loop '{loop.name}'")
+                    return {'FINISHED'}
+            
+            self.report({'WARNING'}, f"Action '{self.action}' not found in loop '{loop.name}'")
+        else:
+            self.report({'ERROR'}, "Invalid loop index")
+
+        return {'CANCELLED'}
+
+
 ### UI AND PANELS
 class ZEPHKIT_PT_LoopToolsPanel(bpy.types.Panel):
 	"""ZephKit Loop Tools Panel"""
@@ -1264,8 +1300,20 @@ class ZEPHKIT_PT_LoopToolsPanel(bpy.types.Panel):
 				layout.prop(loop_props,"audio_volume",text="")
 
 				layout.label(text="--Linked Loops--")
+
+				# LINKED LOOPS
+
 				for x in loop_props.actions:
-					layout.label(text=" * "+x.action.name)
+					row = layout.row()
+					if x.action.name == active_action.name:
+						row.label(text=" * "+x.action.name)
+					else:
+						row.label(text=" - "+x.action.name)
+
+					removeButton = row.operator("zephkit.remove_action_from_loop", text="", icon="TRASH")
+					removeButton.action = x.action.name
+					removeButton.loop_index = active_loop_index
+
 class ZEPHKIT_PT_TemporalObjectsPanel(bpy.types.Panel):
 	bl_idname = "ZEPHKIT_Temporals"
 	bl_label = "Temporal"
@@ -1293,6 +1341,7 @@ class ZEPHKIT_PT_TemporalObjectsPanel(bpy.types.Panel):
 			
 modules = [
 	ZEPHKIT_OT_SetViewMode,
+	ZEPHKIT_OT_RemoveActionFromLoop,
 	ZEPHKIT_OT_NewLoop,
 	ZEPHKIT_OT_TweakActionMode,
 	ZEPHKIT_OT_LinkActionToLoop,
