@@ -330,6 +330,10 @@ class ActionItem(bpy.types.PropertyGroup):
 		type=bpy.types.Action,
 		description="Pointer to an action"
 	)
+
+class AudioEventItem(bpy.types.PropertyGroup):
+
+
 class SceneLoopProperties(bpy.types.PropertyGroup):
 	name: StringProperty(name="Name",
 		description="Name of the loop"
@@ -362,6 +366,7 @@ class SceneLoopProperties(bpy.types.PropertyGroup):
 		update = PROP_update_intensities,
 		default=1.0
 	)
+	
 	audio_pool: StringProperty(
 		name="Audio Pool Folder",
 		description= "Folder to randomly select audio files from.",
